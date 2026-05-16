@@ -21,6 +21,13 @@ class StatisticsTableCard extends HTMLElement {
     this._data = null;
   }
 
+  disconnectedCallback() {
+    if (this._closeExportMenu) {
+      document.removeEventListener('click', this._closeExportMenu);
+      this._closeExportMenu = null;
+    }
+  }
+
   set hass(hass) {
     const firstSet = !this._hass;
     this._hass = hass;
@@ -46,7 +53,10 @@ class StatisticsTableCard extends HTMLElement {
       }),
     };
     if (config.year !== undefined) {
-      this._year = parseInt(config.year);
+      const parsedYear = Number.parseInt(config.year, 10);
+      if (!Number.isNaN(parsedYear)) {
+        this._year = parsedYear;
+      }
     }
     if (this._hass) {
       this._fetchAndRender();
@@ -87,6 +97,7 @@ class StatisticsTableCard extends HTMLElement {
     const needsYoy = entities.some(e => e.yoy);
 
     const rows = Array.from({ length: 12 }, (_, m) => ({
+      monthIndex: m,
       label: MONTHS[m],
       values: new Array(entities.length).fill(null),
       prev: needsYoy ? new Array(entities.length).fill(null) : null,
@@ -475,12 +486,12 @@ class StatisticsTableCard extends HTMLElement {
               </thead>
               <tbody>
                 ${rows.map((row, m) => `
-                  <tr class="${isCurrentYear && m === currentMonth ? 'current-month' : ''}">
+                  <tr class="${isCurrentYear && row.monthIndex === currentMonth ? 'current-month' : ''}">
                     <td>${row.label}</td>
                     ${row.values.map((v, i) => {
                       const hasVal = v !== null && !isNaN(v);
                       const yoy = this._yoyHtml(v, row.prev ? row.prev[i] : null, entities[i]);
-                      const momPrev = m > 0 ? rows[m - 1].values[i] : null;
+                      const momPrev = row.monthIndex > 0 ? allRows[row.monthIndex - 1].values[i] : null;
                       const mom = entities[i].mom ? this._deltaHtml(v, momPrev, entities[i], entities[i].mom) : '';
                       return `<td class="${hasVal ? 'has-value' : 'no-value'}">${this._fmt(v, entities[i].decimals)}${yoy}${mom}</td>`;
                     }).join('')}
@@ -541,8 +552,8 @@ class StatisticsTableCard extends HTMLElement {
 
     const buildExportData = () => {
       const header = ['Month', ...entities.map(e => e.unit ? `${e.name} (${e.unit})` : e.name)];
-      const dataRows = rows.map((row, m) => [
-        MONTHS[m],
+      const dataRows = rows.map((row) => [
+        row.label,
         ...row.values.map((v, i) => v !== null && !isNaN(v) ? v.toFixed(entities[i].decimals) : ''),
       ]);
       const totalRow = ['Total', ...totals.map((t, i) => this._fmt(t, entities[i].decimals))];
