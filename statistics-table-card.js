@@ -1,4 +1,4 @@
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 
 console.info(
   `%c STATISTICS-TABLE-CARD %c v${VERSION} `,
