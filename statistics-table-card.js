@@ -1,4 +1,4 @@
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 
 console.info(
   `%c STATISTICS-TABLE-CARD %c v${VERSION} `,
@@ -8,6 +8,7 @@ console.info(
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const SUPPORTED_FUNCTIONS = ['abs', 'min', 'max'];
 
 class StatisticsTableCard extends HTMLElement {
   constructor() {
@@ -40,17 +41,17 @@ class StatisticsTableCard extends HTMLElement {
     if (!config.entities || !Array.isArray(config.entities) || config.entities.length === 0) {
       throw new Error('statistics-table-card: entities array is required');
     }
+    const normalizedEntities = config.entities.map((entry, index) => this._normalizeEntity(entry, index));
+    normalizedEntities.forEach((entity) => {
+      if (entity.type !== 'derived') return;
+      entity.formulaAst = this._parseFormula(entity.formula);
+      this._bindFormulaReferences(entity.formulaAst, normalizedEntities);
+    });
+    this._validateDerivedGraph(normalizedEntities);
     this._config = {
       title: config.title || 'Monthly Statistics',
       hide_empty: config.hide_empty ?? false,
-      entities: config.entities.map(e => {
-        const entity = typeof e === 'string'
-          ? { entity: e, name: e, unit: '', decimals: 1, yoy: false, mom: false, invert_delta: false }
-          : { unit: '', decimals: 1, name: e.entity, yoy: false, mom: false, invert_delta: false, ...e };
-        if (entity.yoy === true) entity.yoy = 'percent';
-        if (entity.mom === true) entity.mom = 'percent';
-        return entity;
-      }),
+      entities: normalizedEntities,
     };
     if (config.year !== undefined) {
       const parsedYear = Number.parseInt(config.year, 10);
@@ -61,6 +62,58 @@ class StatisticsTableCard extends HTMLElement {
     if (this._hass) {
       this._fetchAndRender();
     }
+  }
+
+  _normalizeEntity(entry, index) {
+    if (typeof entry === 'string') {
+      return {
+        type: 'entity',
+        id: entry,
+        entity: entry,
+        name: entry,
+        unit: '',
+        decimals: 1,
+        yoy: false,
+        mom: false,
+        invert_delta: false,
+      };
+    }
+
+    const isDerived = entry.type === 'derived' || !!entry.formula;
+    const entity = {
+      unit: '',
+      decimals: 1,
+      yoy: false,
+      mom: false,
+      invert_delta: false,
+      ...entry,
+    };
+
+    if (entity.yoy === true) entity.yoy = 'percent';
+    if (entity.mom === true) entity.mom = 'percent';
+
+    if (isDerived) {
+      if (!entity.formula || typeof entity.formula !== 'string') {
+        throw new Error('statistics-table-card: derived columns require a formula string');
+      }
+      return {
+        ...entity,
+        type: 'derived',
+        id: entity.id || `derived_${index}`,
+        name: entity.name || entity.id || `Derived ${index + 1}`,
+      };
+    }
+
+    if (!entity.entity) {
+      throw new Error('statistics-table-card: entity is required for non-derived columns');
+    }
+
+    return {
+      ...entity,
+      type: 'entity',
+      id: entity.id || entity.entity,
+      name: entity.name || entity.entity,
+    };
   }
 
   async _fetchAndRender() {
@@ -74,7 +127,9 @@ class StatisticsTableCard extends HTMLElement {
       const needsYoy = this._config.entities.some(e => e.yoy);
       const startTime = new Date(needsYoy ? this._year - 1 : this._year, 0, 1).toISOString();
       const endTime = new Date(this._year + 1, 0, 1).toISOString();
-      const statIds = this._config.entities.map(e => e.entity);
+      const statIds = this._config.entities
+        .filter(e => e.type === 'entity')
+        .map(e => e.entity);
 
       this._data = await this._hass.callWS({
         type: 'recorder/statistics_during_period',
@@ -92,6 +147,228 @@ class StatisticsTableCard extends HTMLElement {
     this._update();
   }
 
+  _resolveSourceIndex(ref, entities) {
+    const sourceIndex = entities.findIndex(entity => entity.id === ref || entity.entity === ref);
+    if (sourceIndex === -1) {
+      throw new Error(`statistics-table-card: unknown source "${ref}"`);
+    }
+    return sourceIndex;
+  }
+
+  _tokenizeFormula(formula) {
+    const tokens = [];
+    let index = 0;
+
+    while (index < formula.length) {
+      const char = formula[index];
+
+      if (/\s/.test(char)) {
+        index++;
+        continue;
+      }
+
+      if ('+-*/(),'.includes(char)) {
+        tokens.push({ type: char, value: char });
+        index++;
+        continue;
+      }
+
+      if (/\d/.test(char) || (char === '.' && /\d/.test(formula[index + 1] || ''))) {
+        let end = index + 1;
+        while (end < formula.length && /[\d.]/.test(formula[end])) end++;
+        const value = Number(formula.slice(index, end));
+        if (Number.isNaN(value)) {
+          throw new Error(`statistics-table-card: invalid number in formula "${formula}"`);
+        }
+        tokens.push({ type: 'number', value });
+        index = end;
+        continue;
+      }
+
+      if (/[A-Za-z_]/.test(char)) {
+        let end = index + 1;
+        while (end < formula.length && /[A-Za-z0-9_.:-]/.test(formula[end])) end++;
+        tokens.push({ type: 'identifier', value: formula.slice(index, end) });
+        index = end;
+        continue;
+      }
+
+      throw new Error(`statistics-table-card: invalid token "${char}" in formula "${formula}"`);
+    }
+
+    return tokens;
+  }
+
+  _parseFormula(formula) {
+    const tokens = this._tokenizeFormula(formula);
+    let position = 0;
+
+    const peek = () => tokens[position];
+    const consume = (type) => {
+      const token = tokens[position];
+      if (!token || token.type !== type) {
+        throw new Error(`statistics-table-card: expected "${type}" in formula "${formula}"`);
+      }
+      position++;
+      return token;
+    };
+
+    const parsePrimary = () => {
+      const token = peek();
+      if (!token) {
+        throw new Error(`statistics-table-card: unexpected end of formula "${formula}"`);
+      }
+
+      if (token.type === 'number') {
+        position++;
+        return { type: 'number', value: token.value };
+      }
+
+      if (token.type === 'identifier') {
+        position++;
+        if (peek() && peek().type === '(') {
+          const functionName = token.value;
+          if (!SUPPORTED_FUNCTIONS.includes(functionName)) {
+            throw new Error(`statistics-table-card: unsupported function "${functionName}"`);
+          }
+          consume('(');
+          const args = [];
+          if (peek() && peek().type !== ')') {
+            while (true) {
+              args.push(parseExpression());
+              if (!peek() || peek().type !== ',') break;
+              consume(',');
+            }
+          }
+          consume(')');
+          return { type: 'function', name: functionName, args };
+        }
+        return { type: 'ref', ref: token.value };
+      }
+
+      if (token.type === '(') {
+        consume('(');
+        const expression = parseExpression();
+        consume(')');
+        return expression;
+      }
+
+      if (token.type === '+' || token.type === '-') {
+        position++;
+        return { type: 'unary', op: token.type, arg: parsePrimary() };
+      }
+
+      throw new Error(`statistics-table-card: unexpected token "${token.value}" in formula "${formula}"`);
+    };
+
+    const parseMultiplicative = () => {
+      let node = parsePrimary();
+      while (peek() && (peek().type === '*' || peek().type === '/')) {
+        const op = consume(peek().type).type;
+        node = { type: 'binary', op, left: node, right: parsePrimary() };
+      }
+      return node;
+    };
+
+    const parseExpression = () => {
+      let node = parseMultiplicative();
+      while (peek() && (peek().type === '+' || peek().type === '-')) {
+        const op = consume(peek().type).type;
+        node = { type: 'binary', op, left: node, right: parseMultiplicative() };
+      }
+      return node;
+    };
+
+    const ast = parseExpression();
+    if (position !== tokens.length) {
+      throw new Error(`statistics-table-card: unexpected token "${tokens[position].value}" in formula "${formula}"`);
+    }
+    return ast;
+  }
+
+  _bindFormulaReferences(node, entities) {
+    if (node.type === 'ref') {
+      node.index = this._resolveSourceIndex(node.ref, entities);
+      return;
+    }
+
+    if (node.type === 'binary') {
+      this._bindFormulaReferences(node.left, entities);
+      this._bindFormulaReferences(node.right, entities);
+      return;
+    }
+
+    if (node.type === 'unary') {
+      this._bindFormulaReferences(node.arg, entities);
+      return;
+    }
+
+    if (node.type === 'function') {
+      node.args.forEach((arg) => this._bindFormulaReferences(arg, entities));
+    }
+  }
+
+  _evalFormulaNode(node, entities, values, visiting) {
+    if (node.type === 'number') return node.value;
+
+    if (node.type === 'ref') {
+      return this._resolveEntityValue(entities, node.index, values, visiting);
+    }
+
+    if (node.type === 'unary') {
+      const value = this._evalFormulaNode(node.arg, entities, values, visiting);
+      if (value === null || value === undefined || isNaN(value)) return null;
+      return node.op === '-' ? -value : value;
+    }
+
+    if (node.type === 'binary') {
+      const left = this._evalFormulaNode(node.left, entities, values, visiting);
+      const right = this._evalFormulaNode(node.right, entities, values, visiting);
+      if (left === null || left === undefined || isNaN(left) || right === null || right === undefined || isNaN(right)) {
+        return null;
+      }
+      if (node.op === '+') return left + right;
+      if (node.op === '-') return left - right;
+      if (node.op === '*') return left * right;
+      if (node.op === '/') return right === 0 ? null : left / right;
+    }
+
+    if (node.type === 'function') {
+      const args = node.args.map((arg) => this._evalFormulaNode(arg, entities, values, visiting));
+      if (args.some((value) => value === null || value === undefined || isNaN(value))) return null;
+      if (node.name === 'abs') return args.length === 1 ? Math.abs(args[0]) : null;
+      if (node.name === 'min') return args.length > 0 ? Math.min(...args) : null;
+      if (node.name === 'max') return args.length > 0 ? Math.max(...args) : null;
+    }
+
+    return null;
+  }
+
+  _resolveEntityValue(entities, entityIndex, values, visiting = new Set()) {
+    const currentValue = values[entityIndex];
+    if (currentValue !== undefined) return currentValue;
+
+    const entity = entities[entityIndex];
+    if (entity.type !== 'derived') return currentValue;
+
+    if (visiting.has(entityIndex)) {
+      throw new Error(`statistics-table-card: circular dependency involving "${entity.id}"`);
+    }
+
+    visiting.add(entityIndex);
+    const computed = this._evalFormulaNode(entity.formulaAst, entities, values, visiting);
+    values[entityIndex] = computed;
+    visiting.delete(entityIndex);
+    return computed;
+  }
+
+  _validateDerivedGraph(entities) {
+    entities.forEach((entity, index) => {
+      if (entity.type !== 'derived') return;
+      this._resolveEntityValue(entities, index, new Array(entities.length));
+    });
+  }
+
   _buildRows() {
     const { entities } = this._config;
     const needsYoy = entities.some(e => e.yoy);
@@ -104,6 +381,7 @@ class StatisticsTableCard extends HTMLElement {
     }));
 
     entities.forEach((e, colIdx) => {
+      if (e.type !== 'entity') return;
       const points = this._data[e.entity] || [];
       points.forEach(point => {
         const date = new Date(point.start);
@@ -114,6 +392,16 @@ class StatisticsTableCard extends HTMLElement {
           rows[month].values[colIdx] = point.change ?? null;
         } else if (needsYoy && year === this._year - 1) {
           rows[month].prev[colIdx] = point.change ?? null;
+        }
+      });
+    });
+
+    rows.forEach((row) => {
+      entities.forEach((entity, colIdx) => {
+        if (entity.type !== 'derived') return;
+        row.values[colIdx] = this._resolveEntityValue(entities, colIdx, row.values);
+        if (row.prev) {
+          row.prev[colIdx] = this._resolveEntityValue(entities, colIdx, row.prev);
         }
       });
     });
@@ -129,18 +417,15 @@ class StatisticsTableCard extends HTMLElement {
     const positive = entity.invert_delta ? delta < 0 : delta > 0;
     const negative = entity.invert_delta ? delta > 0 : delta < 0;
     const cls = positive ? 'yoy-up' : negative ? 'yoy-dn' : 'yoy-flat';
-    let text;
-    if (mode === 'raw') {
-      text = `${arrow} ${sign}${delta.toFixed(entity.decimals)}`;
-    } else if (mode === 'both') {
-      const pct = prev !== 0 ? (delta / Math.abs(prev) * 100).toFixed(1) : null;
-      text = pct !== null
-        ? `${arrow} ${sign}${delta.toFixed(entity.decimals)} (${sign}${pct}%)`
-        : `${arrow} ${sign}${delta.toFixed(entity.decimals)}`;
-    } else {
-      if (prev === 0) return `<div class="yoy yoy-flat">▸ n/a</div>`;
-      const pct = (delta / Math.abs(prev) * 100).toFixed(1);
-      text = `${arrow} ${sign}${pct}%`;
+    const rawDelta = `${sign}${delta.toFixed(entity.decimals)}`;
+    const pctDelta = prev === 0 ? null : `${sign}${(delta / Math.abs(prev) * 100).toFixed(1)}%`;
+
+    let text = `${arrow} ${rawDelta}`;
+    if (mode === 'both') {
+      if (pctDelta !== null) text = `${text} (${pctDelta})`;
+    } else if (mode !== 'raw') {
+      if (pctDelta === null) return `<div class="yoy yoy-flat">▸ n/a</div>`;
+      text = `${arrow} ${pctDelta}`;
     }
     return `<div class="yoy ${cls}">${text}</div>`;
   }
@@ -152,6 +437,26 @@ class StatisticsTableCard extends HTMLElement {
   _fmt(value, decimals) {
     if (value === null || value === undefined || isNaN(value)) return '—';
     return value.toFixed(decimals);
+  }
+
+  _buildTotals(rows, entities, key) {
+    const totals = new Array(entities.length);
+
+    entities.forEach((entity, index) => {
+      if (entity.type === 'entity') {
+        const hasValue = rows.some((row) => row[key][index] !== null && !isNaN(row[key][index]));
+        totals[index] = hasValue
+          ? rows.reduce((sum, row) => sum + (row[key][index] ?? 0), 0)
+          : null;
+      }
+    });
+
+    entities.forEach((entity, index) => {
+      if (entity.type !== 'derived') return;
+      totals[index] = this._resolveEntityValue(entities, index, totals);
+    });
+
+    return totals;
   }
 
   _update() {
@@ -200,14 +505,9 @@ class StatisticsTableCard extends HTMLElement {
       : allRows;
     const currentYear = new Date().getFullYear();
 
-    const totals = entities.map((_, i) =>
-      rows.reduce((acc, row) => acc + (row.values[i] ?? 0), 0)
-    );
-    const prevTotals = rows[0].prev
-      ? entities.map((_, i) => {
-          const hasPrev = rows.some(row => row.prev[i] !== null && !isNaN(row.prev[i]));
-          return hasPrev ? rows.reduce((acc, row) => acc + (row.prev[i] ?? 0), 0) : null;
-        })
+    const totals = this._buildTotals(rows, entities, 'values');
+    const prevTotals = allRows.length > 0 && allRows[0].prev
+      ? this._buildTotals(rows, entities, 'prev')
       : null;
 
     const currentMonth = new Date().getMonth();
