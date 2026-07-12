@@ -1,4 +1,4 @@
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 
 console.info(
   `%c STATISTICS-TABLE-CARD %c v${VERSION} `,
@@ -376,8 +376,8 @@ class StatisticsTableCard extends HTMLElement {
     const rows = Array.from({ length: 12 }, (_, m) => ({
       monthIndex: m,
       label: MONTHS[m],
-      values: new Array(entities.length),
-      prev: needsYoy ? new Array(entities.length) : null,
+      values: new Array(entities.length).fill(undefined),
+      prev: needsYoy ? new Array(entities.length).fill(undefined) : null,
     }));
 
     entities.forEach((e, colIdx) => {
