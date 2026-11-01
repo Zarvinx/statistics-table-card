@@ -116,6 +116,7 @@ entities:
 | `yoy` | `false` \| `true` \| `'percent'` \| `'raw'` \| `'both'` | `false` | Year-over-year change vs the same month last year. `true` is an alias for `'percent'`. |
 | `mom` | `false` \| `true` \| `'percent'` \| `'raw'` \| `'both'` | `false` | Month-over-month change vs the previous month. `true` is an alias for `'percent'`. |
 | `invert_delta` | boolean | `false` | Invert change colors — decreases become green, increases red. Useful for consumption sensors where less is better. |
+| `hidden` | boolean | `false` | Hide the column from the table and export. It can still be used in derived formulas. |
 
 ### Derived column options
 
@@ -132,6 +133,7 @@ Use `type: derived` to define a calculated column from other columns.
 | `yoy` | `false` \| `true` \| `'percent'` \| `'raw'` \| `'both'` | `false` | Year-over-year change for the derived values |
 | `mom` | `false` \| `true` \| `'percent'` \| `'raw'` \| `'both'` | `false` | Month-over-month change for the derived values |
 | `invert_delta` | boolean | `false` | Invert change colors |
+| `hidden` | boolean | `false` | Hide the column; it can still be referenced by other derived columns |
 
 Derived columns can appear anywhere in the list. Circular references are rejected.
 

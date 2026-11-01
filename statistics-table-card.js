@@ -76,6 +76,7 @@ class StatisticsTableCard extends HTMLElement {
         yoy: false,
         mom: false,
         invert_delta: false,
+        hidden: false,
       };
     }
 
@@ -86,6 +87,7 @@ class StatisticsTableCard extends HTMLElement {
       yoy: false,
       mom: false,
       invert_delta: false,
+      hidden: false,
       ...entry,
     };
 
@@ -513,6 +515,9 @@ class StatisticsTableCard extends HTMLElement {
     const currentMonth = new Date().getMonth();
     const isCurrentYear = this._year === currentYear;
 
+    // Hidden columns stay in values/totals so formulas can use them; they are only skipped when rendering/exporting
+    const visibleCols = entities.map((_, i) => i).filter(i => !entities[i].hidden);
+
     root.innerHTML = `
       <style>
         :host { display: block; }
@@ -781,14 +786,15 @@ class StatisticsTableCard extends HTMLElement {
               <thead>
                 <tr>
                   <th>Month</th>
-                  ${entities.map(e => `<th>${e.name}${e.unit ? `<span class="unit">${e.unit}</span>` : ''}</th>`).join('')}
+                  ${visibleCols.map(i => entities[i]).map(e => `<th>${e.name}${e.unit ? `<span class="unit">${e.unit}</span>` : ''}</th>`).join('')}
                 </tr>
               </thead>
               <tbody>
                 ${rows.map((row, m) => `
                   <tr class="${isCurrentYear && row.monthIndex === currentMonth ? 'current-month' : ''}">
                     <td>${row.label}</td>
-                    ${row.values.map((v, i) => {
+                    ${visibleCols.map(i => {
+                      const v = row.values[i];
                       const hasVal = v !== null && !isNaN(v);
                       const yoy = this._yoyHtml(v, row.prev ? row.prev[i] : null, entities[i]);
                       const momPrev = row.monthIndex > 0 ? allRows[row.monthIndex - 1].values[i] : null;
@@ -801,7 +807,8 @@ class StatisticsTableCard extends HTMLElement {
               <tfoot>
                 <tr>
                   <td>Total</td>
-                  ${totals.map((t, i) => {
+                  ${visibleCols.map(i => {
+                    const t = totals[i];
                     const yoy = prevTotals ? this._yoyHtml(t, prevTotals[i], entities[i]) : '';
                     return `<td>${this._fmt(t, entities[i].decimals)}${yoy}</td>`;
                   }).join('')}
@@ -851,12 +858,15 @@ class StatisticsTableCard extends HTMLElement {
     document.addEventListener('click', this._closeExportMenu);
 
     const buildExportData = () => {
-      const header = ['Month', ...entities.map(e => e.unit ? `${e.name} (${e.unit})` : e.name)];
+      const header = ['Month', ...visibleCols.map(i => entities[i]).map(e => e.unit ? `${e.name} (${e.unit})` : e.name)];
       const dataRows = rows.map((row) => [
         row.label,
-        ...row.values.map((v, i) => v !== null && !isNaN(v) ? v.toFixed(entities[i].decimals) : ''),
+        ...visibleCols.map((i) => {
+          const v = row.values[i];
+          return v !== null && !isNaN(v) ? v.toFixed(entities[i].decimals) : '';
+        }),
       ]);
-      const totalRow = ['Total', ...totals.map((t, i) => this._fmt(t, entities[i].decimals))];
+      const totalRow = ['Total', ...visibleCols.map(i => this._fmt(totals[i], entities[i].decimals))];
       return [header, ...dataRows, totalRow];
     };
 
