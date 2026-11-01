@@ -102,6 +102,9 @@ entities:
 | `title` | string | `Monthly Statistics` | Card title |
 | `year` | number | current year | Initial year; omit to default to current year |
 | `hide_empty` | boolean | `false` | Hide months where all entity values are absent |
+| `language` | string | HA user language | Language for month names, labels and number formatting (e.g. `de`, `fr`, `en-GB`). Defaults to the language and number format set in your HA profile. |
+| `month_format` | `short` \| `long` \| `numeric` \| `2-digit` | `short` | How month names are displayed (`Jan` / `Januar` / `1` / `01`) |
+| `labels` | map | — | Override individual texts, see [Localization](#localization) |
 | `entities` | list | **required** | Columns to display |
 
 ### Entity options
@@ -116,6 +119,7 @@ entities:
 | `yoy` | `false` \| `true` \| `'percent'` \| `'raw'` \| `'both'` | `false` | Year-over-year change vs the same month last year. `true` is an alias for `'percent'`. |
 | `mom` | `false` \| `true` \| `'percent'` \| `'raw'` \| `'both'` | `false` | Month-over-month change vs the previous month. `true` is an alias for `'percent'`. |
 | `invert_delta` | boolean | `false` | Invert change colors — decreases become green, increases red. Useful for consumption sensors where less is better. |
+| `hidden` | boolean | `false` | Hide the column from the table and export. It can still be used in derived formulas. |
 
 ### Derived column options
 
@@ -132,6 +136,7 @@ Use `type: derived` to define a calculated column from other columns.
 | `yoy` | `false` \| `true` \| `'percent'` \| `'raw'` \| `'both'` | `false` | Year-over-year change for the derived values |
 | `mom` | `false` \| `true` \| `'percent'` \| `'raw'` \| `'both'` | `false` | Month-over-month change for the derived values |
 | `invert_delta` | boolean | `false` | Invert change colors |
+| `hidden` | boolean | `false` | Hide the column; it can still be referenced by other derived columns |
 
 Derived columns can appear anywhere in the list. Circular references are rejected.
 
@@ -156,6 +161,31 @@ max(a, b, ...)
 | `both` | `▲ +132.1 (+15.2%)` |
 
 Both `yoy` and `mom` can be set on the same entity and will stack as separate sub-lines.
+
+### Localization
+
+Month names are generated with the browser's `Intl` API, so every language is supported automatically.
+Built-in translations for the remaining texts exist for `en`, `de`, `fr`, `it`, `es` and `nl`; other
+languages fall back to English. The language follows your HA profile unless `language` is set.
+
+Numbers in the table use the **Number format** from your HA profile (e.g. `1.234,5` in German).
+If `language` is set on the card, numbers are formatted for that language instead.
+TSV/CSV exports always use plain numbers with a dot as decimal separator (`1234.5`), so other tools can read them reliably.
+
+Any text can be overridden with `labels`:
+
+```yaml
+type: custom:statistics-table-card
+language: de
+month_format: long
+labels:
+  total: Gesamt
+  month: Zeitraum
+  # optional: your own 12 month names
+  months: [Jan, Feb, Mär, Apr, Mai, Jun, Jul, Aug, Sep, Okt, Nov, Dez]
+```
+
+Available label keys: `month`, `total`, `loading`, `fetch_error`, `export`, `copy_tsv`, `copied`, `download_csv`, `months`.
 
 ## Notes
 
