@@ -6,9 +6,17 @@ console.info(
   'color: #1976d2; background: white; font-weight: bold; padding: 2px 4px;'
 );
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const SUPPORTED_FUNCTIONS = ['abs', 'min', 'max'];
+const MONTH_FORMATS = ['short', 'long', 'numeric', '2-digit'];
+
+const TRANSLATIONS = {
+  en: { month: 'Month', total: 'Total', loading: 'Loading…', fetch_error: 'Failed to fetch statistics', export: 'Export', copy_tsv: 'Copy as TSV', copied: 'Copied!', download_csv: 'Download CSV' },
+  de: { month: 'Monat', total: 'Summe', loading: 'Lädt…', fetch_error: 'Statistiken konnten nicht geladen werden', export: 'Exportieren', copy_tsv: 'Als TSV kopieren', copied: 'Kopiert!', download_csv: 'CSV herunterladen' },
+  fr: { month: 'Mois', total: 'Total', loading: 'Chargement…', fetch_error: 'Impossible de charger les statistiques', export: 'Exporter', copy_tsv: 'Copier en TSV', copied: 'Copié !', download_csv: 'Télécharger CSV' },
+  it: { month: 'Mese', total: 'Totale', loading: 'Caricamento…', fetch_error: 'Impossibile caricare le statistiche', export: 'Esporta', copy_tsv: 'Copia come TSV', copied: 'Copiato!', download_csv: 'Scarica CSV' },
+  es: { month: 'Mes', total: 'Total', loading: 'Cargando…', fetch_error: 'No se pudieron cargar las estadísticas', export: 'Exportar', copy_tsv: 'Copiar como TSV', copied: '¡Copiado!', download_csv: 'Descargar CSV' },
+  nl: { month: 'Maand', total: 'Totaal', loading: 'Laden…', fetch_error: 'Statistieken konden niet worden geladen', export: 'Exporteren', copy_tsv: 'Kopiëren als TSV', copied: 'Gekopieerd!', download_csv: 'CSV downloaden' },
+};
 
 class StatisticsTableCard extends HTMLElement {
   constructor() {
@@ -48,9 +56,15 @@ class StatisticsTableCard extends HTMLElement {
       this._bindFormulaReferences(entity.formulaAst, normalizedEntities);
     });
     this._validateDerivedGraph(normalizedEntities);
+    if (config.month_format !== undefined && !MONTH_FORMATS.includes(config.month_format)) {
+      throw new Error(`statistics-table-card: month_format must be one of ${MONTH_FORMATS.join(', ')}`);
+    }
     this._config = {
       title: config.title || 'Monthly Statistics',
       hide_empty: config.hide_empty ?? false,
+      language: config.language || null,
+      month_format: config.month_format || 'short',
+      labels: config.labels || {},
       entities: normalizedEntities,
     };
     if (config.year !== undefined) {
@@ -142,7 +156,7 @@ class StatisticsTableCard extends HTMLElement {
         types: ['change'],
       });
     } catch (err) {
-      this._error = err.message || 'Failed to fetch statistics';
+      this._error = err.message || this._t('fetch_error');
     }
 
     this._loading = false;
@@ -371,13 +385,73 @@ class StatisticsTableCard extends HTMLElement {
     });
   }
 
+  _language() {
+    return (this._config && this._config.language)
+      || (this._hass && this._hass.locale && this._hass.locale.language)
+      || (this._hass && this._hass.language)
+      || 'en';
+  }
+
+  _t(key) {
+    const override = this._config && this._config.labels[key];
+    if (override !== undefined && override !== null) return String(override);
+    const lang = this._language().toLowerCase();
+    const table = TRANSLATIONS[lang] || TRANSLATIONS[lang.split('-')[0]] || TRANSLATIONS.en;
+    return table[key] ?? TRANSLATIONS.en[key];
+  }
+
+  _numberLocale() {
+    if (this._config && this._config.language) return { locale: this._config.language, grouping: true };
+    const format = this._hass && this._hass.locale && this._hass.locale.number_format;
+    // Mirrors the "Number format" choice in the HA user profile
+    if (format === 'comma_decimal') return { locale: 'en-US', grouping: true };
+    if (format === 'decimal_comma') return { locale: 'de', grouping: true };
+    if (format === 'space_comma') return { locale: 'fr', grouping: true };
+    if (format === 'system') return { locale: undefined, grouping: true };
+    return { locale: this._language(), grouping: format !== 'none' };
+  }
+
+  _formatNumber(value, decimals) {
+    const { locale, grouping } = this._numberLocale();
+    const key = `${locale}|${grouping}|${decimals}`;
+    this._numberFormatters = this._numberFormatters || {};
+    if (!this._numberFormatters[key]) {
+      const options = { minimumFractionDigits: decimals, maximumFractionDigits: decimals, useGrouping: grouping };
+      try {
+        this._numberFormatters[key] = new Intl.NumberFormat(locale, options);
+      } catch (_) {
+        this._numberFormatters[key] = new Intl.NumberFormat('en', options);
+      }
+    }
+    return this._numberFormatters[key].format(value);
+  }
+
+  _monthLabels() {
+    const custom = this._config.labels.months;
+    if (Array.isArray(custom) && custom.length === 12) return custom.map(String);
+
+    const format = this._config.month_format;
+    let formatter;
+    try {
+      formatter = new Intl.DateTimeFormat(this._language(), { month: format });
+    } catch (_) {
+      formatter = new Intl.DateTimeFormat('en', { month: format });
+    }
+    return Array.from({ length: 12 }, (_, m) => {
+      const label = formatter.format(new Date(2000, m, 1));
+      // Some locales abbreviate with a trailing dot (e.g. de "Jan."), which looks noisy in a table
+      return format === 'short' ? label.replace(/\.$/, '') : label;
+    });
+  }
+
   _buildRows() {
     const { entities } = this._config;
     const needsYoy = entities.some(e => e.yoy);
+    const monthLabels = this._monthLabels();
 
     const rows = Array.from({ length: 12 }, (_, m) => ({
       monthIndex: m,
-      label: MONTHS[m],
+      label: monthLabels[m],
       values: new Array(entities.length).fill(undefined),
       prev: needsYoy ? new Array(entities.length).fill(undefined) : null,
     }));
@@ -419,8 +493,8 @@ class StatisticsTableCard extends HTMLElement {
     const positive = entity.invert_delta ? delta < 0 : delta > 0;
     const negative = entity.invert_delta ? delta > 0 : delta < 0;
     const cls = positive ? 'yoy-up' : negative ? 'yoy-dn' : 'yoy-flat';
-    const rawDelta = `${sign}${delta.toFixed(entity.decimals)}`;
-    const pctDelta = prev === 0 ? null : `${sign}${(delta / Math.abs(prev) * 100).toFixed(1)}%`;
+    const rawDelta = `${sign}${this._formatNumber(delta, entity.decimals)}`;
+    const pctDelta = prev === 0 ? null : `${sign}${this._formatNumber(delta / Math.abs(prev) * 100, 1)}%`;
 
     let text = `${arrow} ${rawDelta}`;
     if (mode === 'both') {
@@ -438,7 +512,7 @@ class StatisticsTableCard extends HTMLElement {
 
   _fmt(value, decimals) {
     if (value === null || value === undefined || isNaN(value)) return '—';
-    return value.toFixed(decimals);
+    return this._formatNumber(value, decimals);
   }
 
   _buildTotals(rows, entities, key) {
@@ -477,7 +551,7 @@ class StatisticsTableCard extends HTMLElement {
             opacity: 0.7;
           }
         </style>
-        <ha-card><div class="loading">Loading…</div></ha-card>
+        <ha-card><div class="loading">${this._t('loading')}</div></ha-card>
       `;
       return;
     }
@@ -763,14 +837,14 @@ class StatisticsTableCard extends HTMLElement {
           <span>${title}</span>
           <div style="display:flex;align-items:center;gap:6px;">
             <div class="export-wrap">
-              <button class="export-btn" id="btn-export" title="Export">
+              <button class="export-btn" id="btn-export" title="${this._t('export')}">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
                 </svg>
               </button>
               <div class="export-menu" id="export-menu">
-                <button id="btn-copy">Copy as TSV</button>
-                <button id="btn-download">Download CSV</button>
+                <button id="btn-copy">${this._t('copy_tsv')}</button>
+                <button id="btn-download">${this._t('download_csv')}</button>
               </div>
             </div>
             <div class="year-nav">
@@ -785,7 +859,7 @@ class StatisticsTableCard extends HTMLElement {
             <table>
               <thead>
                 <tr>
-                  <th>Month</th>
+                  <th>${this._t('month')}</th>
                   ${visibleCols.map(i => entities[i]).map(e => `<th>${e.name}${e.unit ? `<span class="unit">${e.unit}</span>` : ''}</th>`).join('')}
                 </tr>
               </thead>
@@ -806,7 +880,7 @@ class StatisticsTableCard extends HTMLElement {
               </tbody>
               <tfoot>
                 <tr>
-                  <td>Total</td>
+                  <td>${this._t('total')}</td>
                   ${visibleCols.map(i => {
                     const t = totals[i];
                     const yoy = prevTotals ? this._yoyHtml(t, prevTotals[i], entities[i]) : '';
@@ -858,7 +932,7 @@ class StatisticsTableCard extends HTMLElement {
     document.addEventListener('click', this._closeExportMenu);
 
     const buildExportData = () => {
-      const header = ['Month', ...visibleCols.map(i => entities[i]).map(e => e.unit ? `${e.name} (${e.unit})` : e.name)];
+      const header = [this._t('month'), ...visibleCols.map(i => entities[i]).map(e => e.unit ? `${e.name} (${e.unit})` : e.name)];
       const dataRows = rows.map((row) => [
         row.label,
         ...visibleCols.map((i) => {
@@ -866,7 +940,11 @@ class StatisticsTableCard extends HTMLElement {
           return v !== null && !isNaN(v) ? v.toFixed(entities[i].decimals) : '';
         }),
       ]);
-      const totalRow = ['Total', ...visibleCols.map(i => this._fmt(totals[i], entities[i].decimals))];
+      // Export keeps plain dot-decimal numbers so spreadsheets and scripts can parse them reliably
+      const totalRow = [this._t('total'), ...visibleCols.map((i) => {
+        const t = totals[i];
+        return t !== null && !isNaN(t) ? t.toFixed(entities[i].decimals) : '';
+      })];
       return [header, ...dataRows, totalRow];
     };
 
@@ -874,7 +952,7 @@ class StatisticsTableCard extends HTMLElement {
       const tsv = buildExportData().map(r => r.join('\t')).join('\n');
       const confirm = () => {
         const btn = root.getElementById('btn-copy');
-        if (btn) { btn.textContent = 'Copied!'; setTimeout(() => { btn.textContent = 'Copy as TSV'; }, 1500); }
+        if (btn) { btn.textContent = this._t('copied'); setTimeout(() => { btn.textContent = this._t('copy_tsv'); }, 1500); }
       };
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(tsv).then(confirm).catch(() => fallbackCopy(tsv, confirm));
